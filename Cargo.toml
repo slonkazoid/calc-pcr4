@@ -6,11 +6,15 @@ edition = "2021"
 [dependencies]
 authenticode = { version = "0.4.3", features = ["object"] }
 clap = { version = "4.5.11", features = ["derive"] }
+color-eyre = "0.6.3"
 digest = "0.10.7"
 fallible-iterator = "0.2.0"
-hex = "0.4.3"
+fancy-regex = "0.13.0"
+hex = { version = "0.4.3", features = ["serde"] }
 libc = "0.2.155"
 object = "0.36.2"
+serde = { version = "1.0.204", features = ["derive"] }
+serde_json = "1.0.121"
 sha1 = "0.10.6"
 sha2 = "0.10.8"
 thiserror = "1.0.63"

@@ -2,23 +2,27 @@
 
 mod args;
 mod device_path;
+mod drop_ins;
 mod find_mount_point;
 mod hash;
 mod util;
 
 use std::fs::OpenOptions;
-use std::io;
+use std::io::{self, BufReader};
 use std::path::PathBuf;
 
-use args::Args;
 use clap::Parser;
-use device_path::traverse_device_path;
+use color_eyre::eyre::{self, Context};
+use drop_ins::FindDropIn;
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8WindowsPathBuf};
 use uefi_eventlog::parsed::ParsedEventData;
 use uefi_eventlog::EventType;
 
+use crate::args::Args;
+use crate::device_path::traverse_device_path;
+use crate::drop_ins::DropIns;
 use crate::hash::*;
 
 #[derive(Error, Debug)]
@@ -37,14 +41,32 @@ impl From<authenticode::PeOffsetError> for Error {
     }
 }
 
-fn main() {
+fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
+
     let args = Args::parse();
     let hash_len = Hasher::from(args.algo).output_size();
 
-    let mut file = OpenOptions::new().read(true).open(args.event_log).unwrap();
+    let drop_ins: Option<DropIns> = match args.drop_ins {
+        Some(drop_ins_file) => Some(
+            serde_json::from_reader(BufReader::new(
+                OpenOptions::new()
+                    .read(true)
+                    .open(drop_ins_file)
+                    .context("couldn't open drop-ins file")?,
+            ))
+            .context("couldn't parse drop-ins JSON")?,
+        ),
+        None => None,
+    };
 
-    let fucking_settings = uefi_eventlog::ParseSettings::new();
-    let mut events = uefi_eventlog::Parser::new(&mut file, &fucking_settings);
+    let mut file = OpenOptions::new()
+        .read(true)
+        .open(args.event_log)
+        .context("couldn't open event log")?;
+
+    let settings = uefi_eventlog::ParseSettings::new();
+    let mut events = uefi_eventlog::Parser::new(&mut file, &settings);
 
     let size = Hasher::from(args.algo).output_size();
 
@@ -70,10 +92,32 @@ fn main() {
             continue;
         }
 
+        let digest;
+        if let Some(event_digest) = event.digests.first() {
+            digest = event_digest.digest();
+        } else {
+            eprintln!("ignoring event with no digest");
+            continue;
+        }
+
         'measure_file: {
             match event.event {
                 EventType::EFIBootServicesApplication => {
-                    let event_data = event.parsed_data.unwrap().unwrap();
+                    let event_data = match event.parsed_data {
+                        Some(event_data) => event_data,
+                        None => {
+                            eprintln!("no event data");
+                            break 'measure_file;
+                        }
+                    };
+                    let event_data = match event_data {
+                        Ok(event_data) => event_data,
+                        Err(err) => {
+                            eprintln!("error while parsing event data: {err}");
+                            break 'measure_file;
+                        }
+                    };
+
                     if let ParsedEventData::ImageLoadEvent { device_path, .. } = event_data
                         && let Some(device_path) = device_path
                     {
@@ -127,8 +171,14 @@ fn main() {
                             esp = PathBuf::from("/boot/efi");
                         }
 
-                        let full_path = esp.join(unix_path.strip_prefix("/").unwrap_or(&unix_path));
+                        let mut full_path =
+                            esp.join(unix_path.strip_prefix("/").unwrap_or(&unix_path));
                         eprintln!("measuring file {full_path:?}");
+
+                        if let Some(drop_in_path) = drop_ins.find_drop_in(&full_path, &digest) {
+                            eprintln!("found drop in for file: {drop_in_path:?}");
+                            full_path = drop_in_path;
+                        };
 
                         let mut hasher = Hasher::from(args.algo);
                         let hash = match hash_by_path(&full_path, &mut hasher, args.bits) {
@@ -153,16 +203,15 @@ fn main() {
             }
         }
 
-        if let Some(digest) = event.digests.first() {
-            let digest = digest.digest();
-            let encoded = hex::encode(digest.as_slice());
-            eprintln!("applying digest: {encoded:0>len$}", len = hash_len * 2);
-            state.measure(&digest, args.algo.into());
-        }
+        let encoded = hex::encode(digest.as_slice());
+        eprintln!("applying digest: {encoded:0>len$}", len = hash_len * 2);
+        state.measure(&digest, args.algo.into());
     }
 
     let hash = state.as_slice();
     let hex = hex::encode(hash);
 
     println!("{hex:0>len$}", len = hash_len * 2);
+
+    Ok(())
 }
