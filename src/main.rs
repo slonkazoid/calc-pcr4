@@ -122,6 +122,7 @@ fn main() -> eyre::Result<()> {
                         && let Some(device_path) = device_path
                     {
                         let (uuid, path) = traverse_device_path(device_path);
+                        eprintln!("devicepath uuid: {uuid:?}, path: {path:?}");
 
                         let windows_path_str = if let Some(windows_path_str) = path {
                             windows_path_str
