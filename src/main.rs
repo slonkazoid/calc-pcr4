@@ -7,6 +7,7 @@ mod find_mount_point;
 mod hash;
 mod util;
 
+use std::borrow::Cow;
 use std::fs::OpenOptions;
 use std::io::{self, BufReader};
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use crate::drop_ins::DropIns;
 use crate::hash::*;
 
 #[derive(Error, Debug)]
+#[allow(clippy::enum_variant_names)]
 enum Error {
     #[error("error while parsing PE file: {0}")]
     PeParseError(#[from] object::Error),
@@ -101,106 +103,98 @@ fn main() -> eyre::Result<()> {
         }
 
         'measure_file: {
-            match event.event {
-                EventType::EFIBootServicesApplication => {
-                    let event_data = match event.parsed_data {
-                        Some(event_data) => event_data,
-                        None => {
-                            eprintln!("no event data");
-                            break 'measure_file;
-                        }
-                    };
-                    let event_data = match event_data {
-                        Ok(event_data) => event_data,
-                        Err(err) => {
-                            eprintln!("error while parsing event data: {err}");
-                            break 'measure_file;
-                        }
-                    };
-
-                    if let ParsedEventData::ImageLoadEvent { device_path, .. } = event_data
-                        && let Some(device_path) = device_path
-                    {
-                        let (uuid, path) = traverse_device_path(device_path);
-                        eprintln!("devicepath uuid: {uuid:?}, path: {path:?}");
-
-                        let windows_path_str = if let Some(windows_path_str) = path {
-                            windows_path_str
-                        } else {
-                            break 'measure_file;
-                        };
-
-                        let windows_path = Utf8WindowsPathBuf::from(windows_path_str);
-                        let unix_path = windows_path.with_encoding::<Utf8UnixEncoding>();
-
-                        let esp;
-
-                        'mnt: {
-                            'get_mnt: {
-                                let id = match uuid {
-                                    Some(id) => id,
-                                    None => {
-                                        eprintln!("uuid not in event log");
-                                        break 'get_mnt;
-                                    }
-                                };
-
-                                let maybe_point = match find_mount_point::by_partuuid(
-                                    &uuid::Uuid::from_u128(id).to_string(),
-                                ) {
-                                    Ok(maybe_point) => maybe_point,
-                                    Err(err) => {
-                                        eprintln!("error while looking up mount point: {err}");
-                                        break 'get_mnt;
-                                    }
-                                };
-
-                                match maybe_point {
-                                    Some(point) => {
-                                        esp = point;
-                                        break 'mnt;
-                                    }
-                                    None => {
-                                        eprintln!("device not mounted");
-                                        break 'get_mnt;
-                                    }
-                                }
-                            }
-
-                            // fallback
-                            eprintln!("couldn't find mount point, assuming \"/boot/efi\"");
-                            esp = PathBuf::from("/boot/efi");
-                        }
-
-                        let mut full_path =
-                            esp.join(unix_path.strip_prefix("/").unwrap_or(&unix_path));
-                        eprintln!("measuring file {full_path:?}");
-
-                        if let Some(drop_in_path) = drop_ins.find_drop_in(&full_path, &digest) {
-                            eprintln!("found drop in for file: {drop_in_path:?}");
-                            full_path = drop_in_path;
-                        };
-
-                        let mut hasher = Hasher::from(args.algo);
-                        let hash = match hash_by_path(&full_path, &mut hasher, args.bits) {
-                            Ok(_) => {
-                                let hash = hasher.finalize();
-                                let encoded = hex::encode(hash.as_slice());
-                                eprintln!("hash: {encoded:0>len$}", len = hash_len * 2);
-                                hash
-                            }
-                            Err(err) => {
-                                eprintln!("error while hashing file: {err}");
-                                break 'measure_file;
-                            }
-                        };
-
-                        state.measure(&hash, args.algo.into());
-                        eprintln!("measured into state");
-                        continue 'process_event;
+            if event.event == EventType::EFIBootServicesApplication {
+                let event_data = match event.parsed_data {
+                    Some(event_data) => event_data,
+                    None => {
+                        eprintln!("no event data");
+                        break 'measure_file;
                     }
+                };
+                let event_data = match event_data {
+                    Ok(event_data) => event_data,
+                    Err(err) => {
+                        eprintln!("error while parsing event data: {err}");
+                        break 'measure_file;
+                    }
+                };
+
+                if let ParsedEventData::ImageLoadEvent { device_path, .. } = event_data
+                    && let Some(device_path) = device_path
+                {
+                    let (uuid, path) = traverse_device_path(device_path);
+                    eprintln!("devicepath uuid: {uuid:?}, path: {path:?}");
+
+                    let windows_path_str = if let Some(windows_path_str) = path {
+                        windows_path_str
+                    } else {
+                        break 'measure_file;
+                    };
+
+                    let windows_path = Utf8WindowsPathBuf::from(windows_path_str);
+                    let unix_path = windows_path.with_encoding::<Utf8UnixEncoding>();
+
+                    let get_mnt = || {
+                        let id = match uuid {
+                            Some(id) => id,
+                            None => {
+                                return Err(Cow::Borrowed("uuid not in event log"));
+                            }
+                        };
+
+                        let maybe_point = match find_mount_point::by_partuuid(
+                            &uuid::Uuid::from_u128(id).to_string(),
+                        ) {
+                            Ok(maybe_point) => maybe_point,
+                            Err(err) => {
+                                return Err(Cow::Owned(format!(
+                                    "error while looking up mount point: {err}"
+                                )));
+                            }
+                        };
+
+                        match maybe_point {
+                            Some(point) => Ok(point),
+                            None => {
+                                return Err(Cow::Borrowed("device not mounted"));
+                            }
+                        }
+                    };
+
+                    let esp = match get_mnt() {
+                        Ok(v) => v,
+                        Err(err) => {
+                            eprintln!("couldn't find mount point: {err}, assuming \"/boot/efi\"");
+                            PathBuf::from("/boot/efi")
+                        }
+                    };
+
+                    let mut full_path = esp.join(unix_path.strip_prefix("/").unwrap_or(&unix_path));
+                    eprintln!("measuring file {full_path:?}");
+
+                    if let Some(drop_in_path) = drop_ins.find_drop_in(&full_path, &digest) {
+                        eprintln!("found drop in for file: {drop_in_path:?}");
+                        full_path = drop_in_path;
+                    };
+
+                    let mut hasher = Hasher::from(args.algo);
+                    let hash = match hash_by_path(&full_path, &mut hasher, args.bits) {
+                        Ok(_) => {
+                            let hash = hasher.finalize();
+                            let encoded = hex::encode(hash.as_slice());
+                            eprintln!("hash: {encoded:0>len$}", len = hash_len * 2);
+                            hash
+                        }
+                        Err(err) => {
+                            eprintln!("error while hashing file: {err}");
+                            break 'measure_file;
+                        }
+                    };
+
+                    state.measure(&hash, args.algo.into());
+                    eprintln!("measured into state");
+                    continue 'process_event;
                 }
-                _ => {}
             }
         }
 

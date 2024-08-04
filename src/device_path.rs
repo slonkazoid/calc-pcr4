@@ -32,9 +32,9 @@ fn recurse_device_path(
 
     match a.next {
         Some(next) => {
-            return recurse_device_path(*next, uuid, path);
+            recurse_device_path(*next, uuid, path)
         }
-        None => return (uuid, path),
+        None => (uuid, path),
     }
 }
 
