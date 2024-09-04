@@ -9,7 +9,7 @@ fn recurse_device_path(
     mut uuid: Option<u128>,
     mut path: Option<String>,
 ) -> (Option<u128>, Option<String>) {
-    match dbg!(&a.info) {
+    match &a.info {
         DevicePathInfo::HardDrive {
             partition_signature,
             signature_type,

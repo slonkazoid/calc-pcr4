@@ -14,7 +14,6 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use color_eyre::eyre::{self, Context};
-use drop_ins::FindDropIn;
 use fallible_iterator::FallibleIterator;
 use thiserror::Error;
 use typed_path::{Utf8UnixEncoding, Utf8WindowsPathBuf};
@@ -23,7 +22,7 @@ use uefi_eventlog::EventType;
 
 use crate::args::Args;
 use crate::device_path::traverse_device_path;
-use crate::drop_ins::DropIns;
+use crate::drop_ins::{DropIns, FindDropIn};
 use crate::hash::*;
 
 #[derive(Error, Debug)]
